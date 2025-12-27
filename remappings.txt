@@ -1,0 +1,2 @@
+@thirdweb-dev/contracts/=node_modules/@thirdweb-dev/contracts/
+

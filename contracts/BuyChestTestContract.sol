@@ -9,18 +9,11 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/cryptography/ECDSAUpgradeable.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts-upgradeable/token/common/ERC2981Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
-/**
- * @title ChestBuyTest
- * @dev Simple Upgradeable ERC1155 with Signature Minting using pure OpenZeppelin v5.
- * 
- * Note: This code is designed for OpenZeppelin Contracts Upgradeable v5.x.
- * If you are compiling locally with v4.x, you will need to update your dependencies:
- * npm install @openzeppelin/contracts-upgradeable@5
- */
+
 contract ChestBuyTest is 
     Initializable, 
     ERC1155Upgradeable, 
@@ -32,7 +25,7 @@ contract ChestBuyTest is
     ReentrancyGuardUpgradeable,
     UUPSUpgradeable 
 {
-    using ECDSAUpgradeable for bytes32;
+    using ECDSA for bytes32;
 
     // --- State Variables ---
 
@@ -42,6 +35,8 @@ contract ChestBuyTest is
     
     // Mapping to track used mint request UIDs to prevent replay attacks
     mapping(bytes32 => bool) public processedUIDs;
+
+    uint256 public nextTokenId;
 
     // Typehash for EIP712
     bytes32 private constant MINT_REQUEST_TYPEHASH = keccak256(
@@ -84,7 +79,6 @@ contract ChestBuyTest is
         __ERC2981_init();
         __EIP712_init("ChestBuyTest", "1");
         __ReentrancyGuard_init();
-        __UUPSUpgradeable_init();
 
         name = _name;
         symbol = _symbol;
@@ -94,10 +88,26 @@ contract ChestBuyTest is
         _setDefaultRoyalty(_royaltyRecipient, _royaltyBps);
     }
 
+    function verify(MintRequest calldata _req, bytes calldata _signature) external view returns (bool, address) {
+        // Basic validation checks
+        if (_req.validityStartTimestamp > block.timestamp) return (false, address(0));
+        if (_req.validityEndTimestamp < block.timestamp) return (false, address(0));
+        if (_req.quantity == 0) return (false, address(0));
+        
+        // Recover signer
+        address signer = _recoverAddress(_req, _signature);
+        bool isValid = (signer == owner());
+        
+        return (isValid, signer);
+    }
     // --- Core Logic ---
 
+    function getNextTokenId() external view returns (uint256) {
+        return nextTokenId;
+    }
+
     /**
-     * @dev Mint tokens using a signature provided by the owner (or authorized signer).
+     * @dev Override mintWithSignature to support auto-increment token IDs.
      */
     function mintWithSignature(
         MintRequest calldata _req,
@@ -115,28 +125,36 @@ contract ChestBuyTest is
 
         // 3. Mark UID as processed
         processedUIDs[_req.uid] = true;
-        
-        // 4. Handle Payment (Native ETH only for simplicity, add ERC20 support if needed)
+
+        // 4. Handle Payment
         if (_req.pricePerToken > 0) {
             uint256 totalPrice = _req.quantity * _req.pricePerToken;
             if (_req.currency == address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE)) {
                 require(msg.value == totalPrice, "Incorrect ETH amount sent");
-                
                 (bool success, ) = owner().call{value: msg.value}("");
                 require(success, "Failed to transfer ETH to owner");
             } else {
-                 // Logic for ERC20 would go here if needed (safeTransferFrom)
                  revert("Only native currency supported currently");
             }
         }
 
-        // 5. Mint
-        if (bytes(_req.uri).length > 0) {
-            _setURI(_req.tokenId, _req.uri);
+        // 5. Determine Token ID
+        uint256 tokenIdToMint;
+        if (_req.tokenId == type(uint256).max) {
+            tokenIdToMint = nextTokenId;
+            nextTokenId += 1;
+        } else {
+            tokenIdToMint = _req.tokenId;
         }
-        _mint(_req.to, _req.tokenId, _req.quantity, "");
 
-        emit TokensMintedWithSignature(signer, _req.to, _req.tokenId, _req);
+        // 6. Mint
+        if (bytes(_req.uri).length > 0) {
+            _setURI(tokenIdToMint, _req.uri);
+        }
+        _mint(_req.to, tokenIdToMint, _req.quantity, "");
+
+        // Emit event with the ACTUAL tokenId minted
+        emit TokensMintedWithSignature(signer, _req.to, tokenIdToMint, _req);
     }
 
     // --- EIP-712 Helpers ---
@@ -158,7 +176,7 @@ contract ChestBuyTest is
 
     function _recoverAddress(MintRequest calldata _req, bytes calldata _signature) internal view returns (address) {
         bytes32 digest = _hashTypedDataV4(_hashRequest(_req));
-        return ECDSAUpgradeable.recover(digest, _signature);
+        return ECDSA.recover(digest, _signature);
     }
 
     // --- Admin Functions ---
